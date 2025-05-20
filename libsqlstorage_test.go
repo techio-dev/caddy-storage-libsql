@@ -7,12 +7,16 @@ import (
 	"database/sql"
 	"testing"
 
+	"os"
+
 	"github.com/caddyserver/caddy/v2"
 	_ "github.com/tursodatabase/go-libsql"
 )
 
 func newTestStorage(t *testing.T) *LibSQLStorage {
 	dbName := "file:./test_local.db"
+	// Xóa file DB cũ trước mỗi test để đảm bảo sạch
+	_ = os.Remove("./test_local.db")
 	db, err := sql.Open("libsql", dbName)
 	if err != nil {
 		t.Fatalf("failed to open db: %v", err)
