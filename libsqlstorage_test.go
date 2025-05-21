@@ -4,33 +4,23 @@ package libsqlstorage
 
 import (
 	"context"
-	"database/sql"
 	"testing"
 
-	"os"
-
 	"github.com/caddyserver/caddy/v2"
-	_ "github.com/tursodatabase/go-libsql"
+	_ "github.com/tursodatabase/libsql-client-go/libsql"
 )
 
 func newTestStorage(t *testing.T) *LibSQLStorage {
-	dbName := "file:./test_local.db"
 	// Xóa file DB cũ trước mỗi test để đảm bảo sạch
-	_ = os.Remove("./test_local.db")
-	db, err := sql.Open("libsql", dbName)
-	if err != nil {
-		t.Fatalf("failed to open db: %v", err)
-	}
-	st := &LibSQLStorage{
-		URL:       dbName,
-		TableName: "caddy_storage",
-		db:        db,
-	}
-	var dummyCtx caddy.Context
-	if err := st.Provision(dummyCtx); err != nil {
-		t.Fatalf("Provision failed: %v", err)
-	}
-	return st
+	dbName := "libsql://test-naicoi92.aws-us-west-2.turso.io?authToken=eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3NDc4MTkzMTcsImlkIjoiMzRlODg1MGQtYzRlNC00ODJhLWI2M2EtZGVmZWI2MmZiOTRiIiwicmlkIjoiYTMwMDdkMmMtNDA0Zi00Y2FhLTk3NmQtMmExNGRhMDBjYmUxIn0.qIPCKRZbpayl1dW8K8e_JDaUQBFdqP2LqbEFY0DYqqiajIbrMJcbqv6A5EgXidhoSfbdhkaq4v5Vpqa3V9KeCA"
+st := &LibSQLStorage{
+URL: dbName,
+}
+var dummyCtx caddy.Context
+if err := st.Provision(dummyCtx); err != nil {
+t.Fatalf("Provision failed: %v", err)
+}
+return st
 }
 
 func TestProvision(t *testing.T) {
@@ -40,9 +30,9 @@ func TestProvision(t *testing.T) {
 	if err != nil {
 		t.Errorf("caddy_storage table not found: %v", err)
 	}
-	_, err = st.db.Exec("SELECT 1 FROM resource_locks")
+	_, err = st.db.Exec("SELECT 1 FROM caddy_resource_locks")
 	if err != nil {
-		t.Errorf("resource_locks table not found: %v", err)
+		t.Errorf("caddy_resource_locks table not found: %v", err)
 	}
 }
 
@@ -68,17 +58,24 @@ func TestStoreLoadExistsStatDelete(t *testing.T) {
 	if string(got) != string(val) {
 		t.Errorf("Load got %q, want %q", got, val)
 	}
-	// Stat
-	info, err := st.Stat(ctx, key)
-	if err != nil {
-		t.Fatalf("Stat failed: %v", err)
-	}
-	if info.Size != int64(len(val)) {
-		t.Errorf("Stat size got %d, want %d", info.Size, len(val))
-	}
-	if info.Key != key {
-		t.Errorf("Stat key got %q, want %q", info.Key, key)
-	}
+// Stat
+info, err := st.Stat(ctx, key)
+if err != nil {
+t.Fatalf("Stat failed: %v", err)
+}
+if info.Size != int64(len(val)) {
+t.Errorf("Stat size got %d, want %d", info.Size, len(val))
+}
+if info.Key != key {
+t.Errorf("Stat key got %q, want %q", info.Key, key)
+}
+// Stat non-existent
+_, err = st.Stat(ctx, "notfound")
+if err == nil {
+t.Error("Stat non-existent should return error")
+} else if err.Error() != "LibSQLStorage: key not found" {
+t.Errorf("Stat non-existent error = %v, want 'LibSQLStorage: key not found'", err)
+}
 	// Delete
 	if err := st.Delete(ctx, key); err != nil {
 		t.Fatalf("Delete failed: %v", err)
@@ -86,10 +83,12 @@ func TestStoreLoadExistsStatDelete(t *testing.T) {
 	if st.Exists(ctx, key) {
 		t.Error("Exists should return false after Delete")
 	}
-	// Delete non-existent
-	if err := st.Delete(ctx, key); err == nil {
-		t.Error("Delete non-existent should return error")
-	}
+// Delete non-existent
+if err := st.Delete(ctx, key); err == nil {
+t.Error("Delete non-existent should return error")
+} else if err.Error() != "LibSQLStorage: key not found" {
+t.Errorf("Delete non-existent error = %v, want 'LibSQLStorage: key not found'", err)
+}
 }
 
 func TestList(t *testing.T) {
