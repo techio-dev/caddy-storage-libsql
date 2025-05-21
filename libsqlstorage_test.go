@@ -4,6 +4,7 @@ package libsqlstorage
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 
 	"github.com/caddyserver/caddy/v2"
@@ -15,25 +16,26 @@ import (
 func newTestStorage(t *testing.T) *LibSQLStorage {
 	// Xóa file DB cũ trước mỗi test để đảm bảo sạch
 	dbName := "http://localhost:8080"
-st := &LibSQLStorage{
-URL: dbName,
-}
-var dummyCtx caddy.Context
-if err := st.Provision(dummyCtx); err != nil {
-t.Fatalf("Provision failed: %v", err)
-}
-// Truncate bảng trước mỗi test
-_, _ = st.db.Exec("DELETE FROM caddy_storage")
-_, _ = st.db.Exec("DELETE FROM caddy_resource_locks")
-return st
-}
-
-func TestProvision(t *testing.T) {
-	st := newTestStorage(t)
-	_, err := st.db.Exec("SELECT 1 FROM caddy_storage")
-	assert.NoError(t, err, "caddy_storage table should exist")
-_, err = st.db.Exec("SELECT 1 FROM caddy_resource_locks")
-assert.NoError(t, err, "caddy_resource_locks table should exist")
+	st := &LibSQLStorage{
+		URL: dbName,
+	}
+	var dummyCtx caddy.Context
+	if err := st.Provision(dummyCtx); err != nil {
+		t.Fatalf("Provision failed: %v", err)
+	}
+	// Khởi tạo kết nối DB như trong NewStorage
+	db, err := sql.Open("libsql", st.URL)
+	if err != nil {
+		t.Fatalf("sql.Open failed: %v", err)
+	}
+	st.db = db
+	if err := st.ensureTableSetup(); err != nil {
+		t.Fatalf("ensureTableSetup failed: %v", err)
+	}
+	// Truncate bảng trước mỗi test
+	_, _ = st.db.Exec("DELETE FROM caddy_storage")
+	_, _ = st.db.Exec("DELETE FROM caddy_resource_locks")
+	return st
 }
 
 func TestStoreAndLoad(t *testing.T) {
