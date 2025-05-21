@@ -3,14 +3,15 @@ package libsqlstorage
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
-	"database/sql"
+	_ "github.com/tursodatabase/libsql-client-go/libsql"
+
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/certmagic"
-	_ "github.com/tursodatabase/go-libsql"
 )
 
 func init() {
@@ -20,12 +21,10 @@ func init() {
 // LibSQLStorage implements Caddy module and storage converter.
 type LibSQLStorage struct {
 	// Configurable fields
-	URL            string `json:"url,omitempty"`
-	AuthToken      string `json:"auth_token,omitempty"`
-	TableName      string `json:"table_name,omitempty"`
-	LockTTLSeconds int    `json:"lock_ttl,omitempty"` // TTL cho lock (giây), mặc định 60
+URL            string `json:"url,omitempty"`
+LockTTLSeconds int    `json:"lock_ttl,omitempty"` // TTL cho lock (giây), mặc định 60
 
-	// Internal DB client
+// Internal DB client
 	db *sql.DB
 }
 
@@ -42,44 +41,35 @@ func (s *LibSQLStorage) Provision(ctx caddy.Context) error {
 	if s.URL == "" {
 		return fmt.Errorf("LibSQLStorage: missing URL")
 	}
-	if s.TableName == "" {
-		s.TableName = "caddy_storage"
-	}
     dsn := s.URL
-    if s.AuthToken != "" {
-        if len(dsn) > 0 && dsn[len(dsn)-1] != '?' {
-            dsn += "?"
-        }
-        dsn += "authToken=" + s.AuthToken
-    }
     var err error
     s.db, err = sql.Open("libsql", dsn)
     if err != nil {
         return fmt.Errorf("LibSQLStorage: failed to open libsql DB: %w", err)
     }
 
-	createTable := fmt.Sprintf(`
-CREATE TABLE IF NOT EXISTS %s (
+createTable := `
+CREATE TABLE IF NOT EXISTS caddy_storage (
 key TEXT PRIMARY KEY,
 value BLOB,
 modified_at TIMESTAMP,
 size INTEGER
-)`, s.TableName)
-	_, err = s.db.ExecContext(context.Background(), createTable)
-	if err != nil {
-		return fmt.Errorf("LibSQLStorage: failed to create table: %w", err)
-	}
-
-	// Tạo bảng resource_locks nếu chưa có
-	createLockTable := `
-CREATE TABLE IF NOT EXISTS resource_locks (
-	key TEXT PRIMARY KEY,
-	expire_at TIMESTAMP
 )`
-	_, err = s.db.ExecContext(context.Background(), createLockTable)
-	if err != nil {
-		return fmt.Errorf("LibSQLStorage: failed to create lock table: %w", err)
-	}
+_, err = s.db.ExecContext(context.Background(), createTable)
+if err != nil {
+return fmt.Errorf("LibSQLStorage: failed to create table: %w", err)
+}
+
+    // Tạo bảng caddy_resource_locks nếu chưa có
+    createLockTable := `
+CREATE TABLE IF NOT EXISTS caddy_resource_locks (
+key TEXT PRIMARY KEY,
+expire_at TIMESTAMP
+)`
+    _, err = s.db.ExecContext(context.Background(), createLockTable)
+    if err != nil {
+        return fmt.Errorf("LibSQLStorage: failed to create lock table: %w", err)
+    }
 	return nil
 }
 
@@ -89,11 +79,11 @@ func (s *LibSQLStorage) Store(ctx context.Context, key string, value []byte) err
 	if now == "" {
 		now = fmt.Sprintf("%d", int64(0))
 	}
-	_, err := s.db.ExecContext(
-		ctx,
-		fmt.Sprintf("INSERT OR REPLACE INTO %s (key, value, modified_at, size) VALUES (?, ?, CURRENT_TIMESTAMP, ?)", s.TableName),
-		key, value, len(value),
-	)
+_, err := s.db.ExecContext(
+ctx,
+"INSERT OR REPLACE INTO caddy_storage (key, value, modified_at, size) VALUES (?, ?, CURRENT_TIMESTAMP, ?)",
+key, value, len(value),
+)
 	if err != nil {
 		return fmt.Errorf("LibSQLStorage: Store failed: %w", err)
 	}
@@ -104,7 +94,7 @@ func (s *LibSQLStorage) Load(ctx context.Context, key string) ([]byte, error) {
     var value []byte
     err := s.db.QueryRowContext(
         ctx,
-        fmt.Sprintf("SELECT value FROM %s WHERE key = ?", s.TableName),
+        "SELECT value FROM caddy_storage WHERE key = ?",
         key,
     ).Scan(&value)
     if err == sql.ErrNoRows {
@@ -119,7 +109,7 @@ func (s *LibSQLStorage) Load(ctx context.Context, key string) ([]byte, error) {
 func (s *LibSQLStorage) Delete(ctx context.Context, key string) error {
     res, err := s.db.ExecContext(
         ctx,
-        fmt.Sprintf("DELETE FROM %s WHERE key = ?", s.TableName),
+        "DELETE FROM caddy_storage WHERE key = ?",
         key,
     )
     if err != nil {
@@ -139,7 +129,7 @@ func (s *LibSQLStorage) Exists(ctx context.Context, key string) bool {
     var exists bool
     err := s.db.QueryRowContext(
         ctx,
-        fmt.Sprintf("SELECT EXISTS(SELECT 1 FROM %s WHERE key = ?)", s.TableName),
+        "SELECT EXISTS(SELECT 1 FROM caddy_storage WHERE key = ?)",
         key,
     ).Scan(&exists)
     return err == nil && exists
@@ -151,14 +141,13 @@ func (s *LibSQLStorage) List(ctx context.Context, prefix string, recursive bool)
     if recursive {
         rows, err = s.db.QueryContext(
             ctx,
-            fmt.Sprintf("SELECT key FROM %s WHERE key LIKE ?", s.TableName),
+            "SELECT key FROM caddy_storage WHERE key LIKE ?",
             prefix+"%",
         )
     } else {
-        // Chỉ lấy key trực tiếp dưới prefix (không có dấu / tiếp theo)
         rows, err = s.db.QueryContext(
             ctx,
-            fmt.Sprintf("SELECT key FROM %s WHERE key LIKE ?", s.TableName),
+            "SELECT key FROM caddy_storage WHERE key LIKE ?",
             prefix+"%",
         )
     }
@@ -172,12 +161,13 @@ func (s *LibSQLStorage) List(ctx context.Context, prefix string, recursive bool)
         if err := rows.Scan(&key); err != nil {
             return nil, fmt.Errorf("LibSQLStorage: List scan failed: %w", err)
         }
-        if !recursive && len(prefix) < len(key) {
+        if !recursive {
             remain := key[len(prefix):]
-            if len(remain) > 0 && string(remain[0]) == "/" && string(remain[1:]) != "" && string(remain[1:]) != "/" {
-                if idx := indexOf(remain[1:], "/"); idx >= 0 {
-                    continue // Có dấu / tiếp theo, bỏ qua nếu không recursive
-                }
+            if len(remain) == 0 {
+                continue
+            }
+            if idx := indexOf(remain, "/"); idx >= 0 {
+                continue // Bỏ qua nếu có dấu / sau prefix
             }
         }
         keys = append(keys, key)
@@ -203,7 +193,7 @@ func (s *LibSQLStorage) Stat(ctx context.Context, key string) (certmagic.KeyInfo
     var modifiedAtStr string
     err := s.db.QueryRowContext(
         ctx,
-        fmt.Sprintf("SELECT size, modified_at FROM %s WHERE key = ?", s.TableName),
+        "SELECT size, modified_at FROM caddy_storage WHERE key = ?",
         key,
     ).Scan(&size, &modifiedAtStr)
     if err == sql.ErrNoRows {
@@ -233,35 +223,48 @@ func (s *LibSQLStorage) Lock(ctx context.Context, key string) error {
 		ttl = 60
 	}
 	// Xóa các lock đã hết hạn
-	_, _ = s.db.ExecContext(ctx, "DELETE FROM resource_locks WHERE expire_at <= CURRENT_TIMESTAMP")
+    _, _ = s.db.ExecContext(ctx, "DELETE FROM caddy_resource_locks WHERE expire_at <= CURRENT_TIMESTAMP")
 
-	// Tính expire_at
-	expireAt := time.Now().Add(time.Duration(ttl) * time.Second).Format("2006-01-02 15:04:05")
-	// Cố gắng insert lock mới
-	_, err := s.db.ExecContext(ctx,
-		"INSERT INTO resource_locks (key, expire_at) VALUES (?, ?)",
-		key, expireAt,
-	)
-	if err != nil {
-		// Nếu đã tồn tại, kiểm tra lock còn hạn không
-		var dbExpire string
-		row := s.db.QueryRowContext(ctx, "SELECT expire_at FROM resource_locks WHERE key = ?", key)
-		if err2 := row.Scan(&dbExpire); err2 == nil {
-			// Nếu vẫn còn hạn, trả về lỗi
-			t, err3 := time.Parse("2006-01-02 15:04:05", dbExpire)
-			if err3 == nil && t.After(time.Now()) {
-				return fmt.Errorf("LibSQLStorage: key is locked")
-			}
-		}
-		return fmt.Errorf("LibSQLStorage: lock failed: %w", err)
-	}
-	return nil
+    // Tính expire_at
+    expireAt := time.Now().Add(time.Duration(ttl) * time.Second).Format("2006-01-02 15:04:05")
+    // Cố gắng insert lock mới
+    _, err := s.db.ExecContext(ctx,
+        "INSERT INTO caddy_resource_locks (key, expire_at) VALUES (?, ?)",
+        key, expireAt,
+    )
+    if err != nil {
+        // Nếu đã tồn tại, kiểm tra lock còn hạn không
+        var dbExpire string
+        row := s.db.QueryRowContext(ctx, "SELECT expire_at FROM caddy_resource_locks WHERE key = ?", key)
+        if err2 := row.Scan(&dbExpire); err2 == nil {
+            // Thử parse theo RFC3339 trước, nếu lỗi thì thử định dạng cũ
+            t, err3 := time.Parse(time.RFC3339, dbExpire)
+            if err3 != nil {
+                t, err3 = time.Parse("2006-01-02 15:04:05", dbExpire)
+            }
+            if err3 == nil && t.After(time.Now().UTC()) {
+                return fmt.Errorf("LibSQLStorage: key is locked")
+            }
+            // Nếu lock đã hết hạn, xóa và thử insert lại
+            _, _ = s.db.ExecContext(ctx, "DELETE FROM caddy_resource_locks WHERE key = ?", key)
+            _, err4 := s.db.ExecContext(ctx,
+                "INSERT INTO caddy_resource_locks (key, expire_at) VALUES (?, ?)",
+                key, expireAt,
+            )
+            if err4 != nil {
+                return fmt.Errorf("LibSQLStorage: lock failed after cleanup: %w", err4)
+            }
+            return nil
+        }
+        return fmt.Errorf("LibSQLStorage: lock failed: %w", err)
+    }
+    return nil
 }
 
 func (s *LibSQLStorage) Unlock(ctx context.Context, key string) error {
-	_, _ = s.db.ExecContext(ctx, "DELETE FROM resource_locks WHERE key = ?", key)
-	// Luôn trả về thành công
-	return nil
+    _, _ = s.db.ExecContext(ctx, "DELETE FROM caddy_resource_locks WHERE key = ?", key)
+    // Luôn trả về thành công
+    return nil
 }
 
 var (
