@@ -7,12 +7,14 @@ import (
 	"testing"
 
 	"github.com/caddyserver/caddy/v2"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	_ "github.com/tursodatabase/libsql-client-go/libsql"
 )
 
 func newTestStorage(t *testing.T) *LibSQLStorage {
 	// Xóa file DB cũ trước mỗi test để đảm bảo sạch
-	dbName := "libsql://test-naicoi92.aws-us-west-2.turso.io?authToken=eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3NDc4MTkzMTcsImlkIjoiMzRlODg1MGQtYzRlNC00ODJhLWI2M2EtZGVmZWI2MmZiOTRiIiwicmlkIjoiYTMwMDdkMmMtNDA0Zi00Y2FhLTk3NmQtMmExNGRhMDBjYmUxIn0.qIPCKRZbpayl1dW8K8e_JDaUQBFdqP2LqbEFY0DYqqiajIbrMJcbqv6A5EgXidhoSfbdhkaq4v5Vpqa3V9KeCA"
+	dbName := "http://localhost:8080"
 st := &LibSQLStorage{
 URL: dbName,
 }
@@ -20,75 +22,77 @@ var dummyCtx caddy.Context
 if err := st.Provision(dummyCtx); err != nil {
 t.Fatalf("Provision failed: %v", err)
 }
+// Truncate bảng trước mỗi test
+_, _ = st.db.Exec("DELETE FROM caddy_storage")
+_, _ = st.db.Exec("DELETE FROM caddy_resource_locks")
 return st
 }
 
 func TestProvision(t *testing.T) {
 	st := newTestStorage(t)
-	// Check tables exist
 	_, err := st.db.Exec("SELECT 1 FROM caddy_storage")
-	if err != nil {
-		t.Errorf("caddy_storage table not found: %v", err)
-	}
-	_, err = st.db.Exec("SELECT 1 FROM caddy_resource_locks")
-	if err != nil {
-		t.Errorf("caddy_resource_locks table not found: %v", err)
-	}
+	assert.NoError(t, err, "caddy_storage table should exist")
+_, err = st.db.Exec("SELECT 1 FROM caddy_resource_locks")
+assert.NoError(t, err, "caddy_resource_locks table should exist")
 }
 
-func TestStoreLoadExistsStatDelete(t *testing.T) {
+func TestStoreAndLoad(t *testing.T) {
 	st := newTestStorage(t)
 	ctx := context.Background()
 	key := "testkey"
 	val := []byte("testvalue")
 
-	// Store
-	if err := st.Store(ctx, key, val); err != nil {
-		t.Fatalf("Store failed: %v", err)
-	}
-	// Exists
-	if !st.Exists(ctx, key) {
-		t.Error("Exists should return true after Store")
-	}
-	// Load
+	err := st.Store(ctx, key, val)
+	require.NoError(t, err, "Store should not fail")
+
 	got, err := st.Load(ctx, key)
-	if err != nil {
-		t.Fatalf("Load failed: %v", err)
-	}
-	if string(got) != string(val) {
-		t.Errorf("Load got %q, want %q", got, val)
-	}
-// Stat
-info, err := st.Stat(ctx, key)
-if err != nil {
-t.Fatalf("Stat failed: %v", err)
+	require.NoError(t, err, "Load should not fail")
+	assert.Equal(t, val, got, "Loaded value should match stored value")
 }
-if info.Size != int64(len(val)) {
-t.Errorf("Stat size got %d, want %d", info.Size, len(val))
+
+func TestExists(t *testing.T) {
+	st := newTestStorage(t)
+	ctx := context.Background()
+	key := "testkey"
+	val := []byte("testvalue")
+
+	require.NoError(t, st.Store(ctx, key, val))
+	assert.True(t, st.Exists(ctx, key), "Exists should return true after Store")
+
+	require.NoError(t, st.Delete(ctx, key))
+	assert.False(t, st.Exists(ctx, key), "Exists should return false after Delete")
 }
-if info.Key != key {
-t.Errorf("Stat key got %q, want %q", info.Key, key)
+
+func TestStat(t *testing.T) {
+	st := newTestStorage(t)
+	ctx := context.Background()
+	key := "testkey"
+	val := []byte("testvalue")
+
+	require.NoError(t, st.Store(ctx, key, val))
+	info, err := st.Stat(ctx, key)
+	require.NoError(t, err, "Stat should not fail")
+	assert.Equal(t, int64(len(val)), info.Size, "Stat size should match value length")
+	assert.Equal(t, key, info.Key, "Stat key should match")
+
+	_, err = st.Stat(ctx, "notfound")
+	assert.Error(t, err, "Stat non-existent should return error")
+	assert.EqualError(t, err, "LibSQLStorage: key not found")
 }
-// Stat non-existent
-_, err = st.Stat(ctx, "notfound")
-if err == nil {
-t.Error("Stat non-existent should return error")
-} else if err.Error() != "LibSQLStorage: key not found" {
-t.Errorf("Stat non-existent error = %v, want 'LibSQLStorage: key not found'", err)
-}
-	// Delete
-	if err := st.Delete(ctx, key); err != nil {
-		t.Fatalf("Delete failed: %v", err)
-	}
-	if st.Exists(ctx, key) {
-		t.Error("Exists should return false after Delete")
-	}
-// Delete non-existent
-if err := st.Delete(ctx, key); err == nil {
-t.Error("Delete non-existent should return error")
-} else if err.Error() != "LibSQLStorage: key not found" {
-t.Errorf("Delete non-existent error = %v, want 'LibSQLStorage: key not found'", err)
-}
+
+func TestDelete(t *testing.T) {
+	st := newTestStorage(t)
+	ctx := context.Background()
+	key := "testkey"
+	val := []byte("testvalue")
+
+	require.NoError(t, st.Store(ctx, key, val))
+	require.NoError(t, st.Delete(ctx, key), "Delete should not fail")
+	assert.False(t, st.Exists(ctx, key), "Exists should return false after Delete")
+
+	err := st.Delete(ctx, key)
+	assert.Error(t, err, "Delete non-existent should return error")
+	assert.EqualError(t, err, "LibSQLStorage: key not found")
 }
 
 func TestList(t *testing.T) {
@@ -96,65 +100,29 @@ func TestList(t *testing.T) {
 	ctx := context.Background()
 	keys := []string{"foo/one", "foo/two", "foo/bar/baz"}
 	for _, k := range keys {
-		if err := st.Store(ctx, k, []byte("v")); err != nil {
-			t.Fatalf("Store %q failed: %v", k, err)
-		}
+		require.NoError(t, st.Store(ctx, k, []byte("v")), "Store %q failed", k)
 	}
 	// List non-recursive
 	got, err := st.List(ctx, "foo/", false)
-	if err != nil {
-		t.Fatalf("List non-recursive failed: %v", err)
-	}
+	require.NoError(t, err, "List non-recursive failed")
 	want := []string{"foo/one", "foo/two"}
-	for _, w := range want {
-		found := false
-		for _, g := range got {
-			if g == w {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("List non-recursive missing %q", w)
-		}
-	}
+	assert.ElementsMatch(t, want, got, "List non-recursive should match expected keys")
+
 	// List recursive
 	got, err = st.List(ctx, "foo/", true)
-	if err != nil {
-		t.Fatalf("List recursive failed: %v", err)
-	}
-	for _, w := range keys {
-		found := false
-		for _, g := range got {
-			if g == w {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("List recursive missing %q", w)
-		}
-	}
+	require.NoError(t, err, "List recursive failed")
+	assert.ElementsMatch(t, keys, got, "List recursive should match all keys")
 }
 
 func TestLockUnlock(t *testing.T) {
 	st := newTestStorage(t)
 	ctx := context.Background()
 	key := "lockkey"
-	// Lock
-	if err := st.Lock(ctx, key); err != nil {
-		t.Fatalf("Lock failed: %v", err)
-	}
-	// Lock again (should fail)
-	if err := st.Lock(ctx, key); err == nil {
-		t.Error("Lock should fail if already locked")
-	}
-	// Unlock
-	if err := st.Unlock(ctx, key); err != nil {
-		t.Fatalf("Unlock failed: %v", err)
-	}
-	// Lock again (should succeed)
-	if err := st.Lock(ctx, key); err != nil {
-		t.Fatalf("Lock after unlock failed: %v", err)
-	}
+
+	require.NoError(t, st.Lock(ctx, key), "Lock should not fail")
+	err := st.Lock(ctx, key)
+	assert.Error(t, err, "Lock should fail if already locked")
+
+	require.NoError(t, st.Unlock(ctx, key), "Unlock should not fail")
+	require.NoError(t, st.Lock(ctx, key), "Lock after unlock should succeed")
 }
