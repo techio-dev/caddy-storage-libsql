@@ -1,4 +1,4 @@
-module github.com/techio-dev/caddy-libsql-storage
+module github.com/techio-dev/caddy-storage-libsql
 
 go 1.24.2
 
