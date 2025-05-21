@@ -6,11 +6,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"time"
 
 	_ "github.com/tursodatabase/libsql-client-go/libsql"
-
-	"time"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/certmagic"
@@ -118,7 +118,9 @@ func (s *LibSQLStorage) Store(ctx context.Context, key string, value []byte) err
 	_, err := s.db.ExecContext(
 		ctx,
 		"INSERT OR REPLACE INTO caddy_storage (key, value, modified_at, size) VALUES (?, ?, CURRENT_TIMESTAMP, ?)",
-		key, value, len(value),
+		key,
+		value,
+		len(value),
 	)
 	if err != nil {
 		return fmt.Errorf("LibSQLStorage: Store failed: %w", err)
@@ -134,7 +136,7 @@ func (s *LibSQLStorage) Load(ctx context.Context, key string) ([]byte, error) {
 		key,
 	).Scan(&value)
 	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("LibSQLStorage: key not found")
+		return nil, fs.ErrNotExist
 	}
 	if err != nil {
 		return nil, fmt.Errorf("LibSQLStorage: Load failed: %w", err)
@@ -259,7 +261,10 @@ func (s *LibSQLStorage) Lock(ctx context.Context, key string) error {
 		ttl = 60
 	}
 	// Xóa các lock đã hết hạn
-	_, _ = s.db.ExecContext(ctx, "DELETE FROM caddy_resource_locks WHERE expire_at <= CURRENT_TIMESTAMP")
+	_, _ = s.db.ExecContext(
+		ctx,
+		"DELETE FROM caddy_resource_locks WHERE expire_at <= CURRENT_TIMESTAMP",
+	)
 
 	// Tính expire_at
 	expireAt := time.Now().Add(time.Duration(ttl) * time.Second).Format("2006-01-02 15:04:05")
@@ -271,7 +276,11 @@ func (s *LibSQLStorage) Lock(ctx context.Context, key string) error {
 	if err != nil {
 		// Nếu đã tồn tại, kiểm tra lock còn hạn không
 		var dbExpire string
-		row := s.db.QueryRowContext(ctx, "SELECT expire_at FROM caddy_resource_locks WHERE key = ?", key)
+		row := s.db.QueryRowContext(
+			ctx,
+			"SELECT expire_at FROM caddy_resource_locks WHERE key = ?",
+			key,
+		)
 		if err2 := row.Scan(&dbExpire); err2 == nil {
 			// Thử parse theo RFC3339 trước, nếu lỗi thì thử định dạng cũ
 			t, err3 := time.Parse(time.RFC3339, dbExpire)
